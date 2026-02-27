@@ -1,5 +1,5 @@
 const https = require('https');
-const { User, InboxItem } = require('../../models');
+const { User, InboxItem, Task, Note, Project, Area } = require('../../models');
 
 // Create poller state
 const createPollerState = () => ({
@@ -13,6 +13,31 @@ const createPollerState = () => ({
 
 // Global mutable state (managed functionally)
 let pollerState = createPollerState();
+
+// Conversation state for multi-step flows (e.g., project due-date input)
+// key: `${userId}_${chatId}`, value: { type, projectId, projectName, createdAt }
+const pendingConversations = new Map();
+const CONVERSATION_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
+
+const setPendingConversation = (userId, chatId, data) => {
+    const key = `${userId}_${chatId}`;
+    pendingConversations.set(key, { ...data, createdAt: Date.now() });
+};
+
+const getPendingConversation = (userId, chatId) => {
+    const key = `${userId}_${chatId}`;
+    const conv = pendingConversations.get(key);
+    if (!conv) return null;
+    if (Date.now() - conv.createdAt > CONVERSATION_TIMEOUT_MS) {
+        pendingConversations.delete(key);
+        return null;
+    }
+    return conv;
+};
+
+const clearPendingConversation = (userId, chatId) => {
+    pendingConversations.delete(`${userId}_${chatId}`);
+};
 
 // Check if user exists in list
 const userExistsInList = (users, userId) => users.some((u) => u.id === userId);
@@ -192,6 +217,47 @@ const sendTelegramMessage = async (
     }
 };
 
+// Send a message with inline keyboard buttons
+// buttons: array of rows, each row is array of { text, callback_data }
+const sendTelegramMessageWithButtons = async (token, chatId, text, buttons) => {
+    try {
+        const postData = JSON.stringify({
+            chat_id: chatId,
+            text,
+            reply_markup: { inline_keyboard: buttons },
+        });
+        const url = createTelegramUrl(token, 'sendMessage');
+        const requestOptions = {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Content-Length': Buffer.byteLength(postData),
+            },
+        };
+        return await makeHttpPostRequest(url, postData, requestOptions);
+    } catch (error) {
+        throw error;
+    }
+};
+
+// Acknowledge a callback query to clear Telegram's loading spinner
+const answerTelegramCallbackQuery = async (token, callbackQueryId) => {
+    try {
+        const postData = JSON.stringify({ callback_query_id: callbackQueryId });
+        const url = createTelegramUrl(token, 'answerCallbackQuery');
+        const requestOptions = {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Content-Length': Buffer.byteLength(postData),
+            },
+        };
+        return await makeHttpPostRequest(url, postData, requestOptions);
+    } catch (error) {
+        throw error;
+    }
+};
+
 // Side effect function to update user chat ID
 const updateUserChatId = async (userId, chatId) => {
     await User.update({ telegram_chat_id: chatId }, { where: { id: userId } });
@@ -273,6 +339,215 @@ const isAuthorizedTelegramUser = (user, message) => {
     return false;
 };
 
+// --- Project setup flow helpers ---
+
+const sendProjectPriorityButtons = async (token, chatId, projectId, projectName) => {
+    const buttons = [[
+        { text: 'Low', callback_data: `proj_priority:${projectId}:low` },
+        { text: 'Medium', callback_data: `proj_priority:${projectId}:medium` },
+        { text: 'High', callback_data: `proj_priority:${projectId}:high` },
+        { text: 'Skip →', callback_data: `proj_priority:${projectId}:skip` },
+    ]];
+    await sendTelegramMessageWithButtons(
+        token, chatId, `Set priority for "${projectName}":`, buttons
+    );
+};
+
+const sendProjectStatusButtons = async (token, chatId, projectId) => {
+    const buttons = [
+        [
+            { text: 'Not Started', callback_data: `proj_status:${projectId}:not_started` },
+            { text: 'In Progress', callback_data: `proj_status:${projectId}:in_progress` },
+        ],
+        [
+            { text: 'Planned', callback_data: `proj_status:${projectId}:planned` },
+            { text: 'Waiting', callback_data: `proj_status:${projectId}:waiting` },
+            { text: 'Skip →', callback_data: `proj_status:${projectId}:skip` },
+        ],
+    ];
+    await sendTelegramMessageWithButtons(token, chatId, 'Set status:', buttons);
+};
+
+const sendProjectAreaButtons = async (token, chatId, projectId, userId) => {
+    const areas = await Area.findAll({ where: { user_id: userId } });
+    if (!areas.length) {
+        // No areas — skip directly to due date
+        await sendProjectDueDatePrompt(token, chatId);
+        return false; // signal: skipped
+    }
+
+    const areaButtons = areas.map((area) => ({
+        text: area.name,
+        callback_data: `proj_area:${projectId}:${area.id}`,
+    }));
+
+    // Group into rows of max 3
+    const rows = [];
+    for (let i = 0; i < areaButtons.length; i += 3) {
+        rows.push(areaButtons.slice(i, i + 3));
+    }
+    rows.push([{ text: 'Skip →', callback_data: `proj_area:${projectId}:skip` }]);
+
+    await sendTelegramMessageWithButtons(token, chatId, 'Set area:', rows);
+    return true; // signal: area step shown
+};
+
+const sendProjectDueDatePrompt = async (token, chatId) => {
+    await sendTelegramMessage(
+        token, chatId,
+        `Set due date (or send 'skip'):\nFormat: YYYY-MM-DD  (e.g. 2026-06-01)`
+    );
+};
+
+// --- Slash command handlers ---
+
+const handleTaskCommand = async (args, user, chatId, messageId) => {
+    if (!args) {
+        await sendTelegramMessage(
+            user.telegram_bot_token, chatId,
+            '⚠️ Usage: /task <name>\nExample: /task Buy groceries',
+            messageId
+        );
+        return;
+    }
+    await Task.create({ name: args, user_id: user.id, status: 0 });
+    await sendTelegramMessage(
+        user.telegram_bot_token, chatId,
+        `✅ Task created: "${args}"`,
+        messageId
+    );
+    console.log(`Task created via Telegram for user ${user.id}: "${args}"`);
+};
+
+const handleNoteCommand = async (args, user, chatId, messageId) => {
+    if (!args) {
+        await sendTelegramMessage(
+            user.telegram_bot_token, chatId,
+            '⚠️ Usage: /note <text>\nExample: /note Remember to call the doctor',
+            messageId
+        );
+        return;
+    }
+    await Note.create({ content: args, user_id: user.id });
+    await sendTelegramMessage(
+        user.telegram_bot_token, chatId,
+        '✅ Note saved.',
+        messageId
+    );
+    console.log(`Note created via Telegram for user ${user.id}`);
+};
+
+const handleProjectCommand = async (args, user, chatId, messageId) => {
+    if (!args) {
+        await sendTelegramMessage(
+            user.telegram_bot_token, chatId,
+            '⚠️ Usage: /project <name>\nExample: /project Home Renovation Q2',
+            messageId
+        );
+        return;
+    }
+    const project = await Project.create({
+        name: args,
+        user_id: user.id,
+        status: 'not_started',
+    });
+    console.log(`Project created via Telegram for user ${user.id}: "${args}" (id=${project.id})`);
+    await sendProjectPriorityButtons(user.telegram_bot_token, chatId, project.id, project.name);
+};
+
+// --- Callback query handler (inline button taps) ---
+
+const processCallbackQuery = async (user, callbackQuery) => {
+    const chatId = callbackQuery.message.chat.id.toString();
+    const data = callbackQuery.data || '';
+    const botToken = user.telegram_bot_token;
+
+    // Authorization check
+    const authMessage = { from: callbackQuery.from };
+    if (!isAuthorizedTelegramUser(user, authMessage)) {
+        console.log(
+            `Ignoring callback from unauthorized Telegram user ${callbackQuery.from.id} for bot owner ${user.id}`
+        );
+        return;
+    }
+
+    // Acknowledge the callback query to clear Telegram's loading spinner
+    try {
+        await answerTelegramCallbackQuery(botToken, callbackQuery.id);
+    } catch (e) {
+        console.error('Error answering callback query:', e);
+    }
+
+    // Parse: `{action}:{projectId}:{value}` — value may contain colons
+    const firstColon = data.indexOf(':');
+    if (firstColon === -1) return;
+    const action = data.slice(0, firstColon);
+    const rest = data.slice(firstColon + 1);
+    const secondColon = rest.indexOf(':');
+    if (secondColon === -1) return;
+    const projectId = parseInt(rest.slice(0, secondColon), 10);
+    const value = rest.slice(secondColon + 1);
+
+    if (isNaN(projectId)) return;
+
+    // Validate project belongs to this app user
+    let project;
+    try {
+        project = await Project.findOne({ where: { id: projectId, user_id: user.id } });
+    } catch (e) {
+        console.error('Error finding project for callback:', e);
+        return;
+    }
+    if (!project) {
+        console.log(`Callback: project ${projectId} not found for user ${user.id}`);
+        return;
+    }
+
+    try {
+        if (action === 'proj_priority') {
+            if (value !== 'skip') {
+                const priorityMap = { low: 0, medium: 1, high: 2 };
+                const priority = priorityMap[value];
+                if (priority !== undefined) {
+                    await project.update({ priority });
+                }
+            }
+            await sendProjectStatusButtons(botToken, chatId, projectId);
+
+        } else if (action === 'proj_status') {
+            if (value !== 'skip') {
+                await project.update({ status: value });
+            }
+            const areaStepShown = await sendProjectAreaButtons(botToken, chatId, projectId, user.id);
+            // If no areas, sendProjectAreaButtons already sent the due date prompt — set state
+            if (!areaStepShown) {
+                setPendingConversation(user.id, chatId, {
+                    type: 'project_due_date',
+                    projectId,
+                    projectName: project.name,
+                });
+            }
+
+        } else if (action === 'proj_area') {
+            if (value !== 'skip') {
+                const areaId = parseInt(value, 10);
+                if (!isNaN(areaId)) {
+                    await project.update({ area_id: areaId });
+                }
+            }
+            setPendingConversation(user.id, chatId, {
+                type: 'project_due_date',
+                projectId,
+                projectName: project.name,
+            });
+            await sendProjectDueDatePrompt(botToken, chatId);
+        }
+    } catch (error) {
+        console.error(`Error processing callback query for user ${user.id}:`, error);
+        await sendTelegramMessage(botToken, chatId, `❌ Failed to update project: ${error.message}`);
+    }
+};
+
 // Function to handle bot commands
 const handleBotCommand = async (command, user, chatId, messageId) => {
     const botToken = user.telegram_bot_token;
@@ -282,7 +557,7 @@ const handleBotCommand = async (command, user, chatId, messageId) => {
             await sendTelegramMessage(
                 botToken,
                 chatId,
-                `🎉 Welcome to tududi!\n\nYour personal task management bot is now connected and ready to help!\n\n📝 Simply send me any message and I'll add it to your tududi inbox as an item.\n\n✨ Commands:\n• /help - Show help information\n• /start - Show welcome message\n• Just type any text - Add it as an inbox item\n\nLet's get organized! 🚀`,
+                `🎉 Welcome to tududi!\n\nYour personal task management bot is now connected and ready to help!\n\n📝 Send me any text to add it to your inbox, or use commands:\n• /task <name> — Create a task\n• /note <text> — Create a note\n• /project <name> — Create a project\n• /help — Show all commands\n\nLet's get organized! 🚀`,
                 messageId
             );
             break;
@@ -290,7 +565,7 @@ const handleBotCommand = async (command, user, chatId, messageId) => {
             await sendTelegramMessage(
                 botToken,
                 chatId,
-                `📋 tududi Bot Help\n\nSend me any text message and I'll add it to your tududi inbox as an inbox item.\n\nCommands:\n/start - Welcome message\n/help - Show this help message\n\nJust type your item and I'll take care of the rest!`,
+                `📋 tududi Bot Help\n\nCommands:\n/task <name>    - Create a task directly\n/note <text>    - Create a note directly\n/project <name> - Create a project (tap buttons to set details)\n/start          - Welcome message\n/help           - Show this help message\n\nOr just send any text to add it to your inbox.`,
                 messageId
             );
             break;
@@ -366,26 +641,73 @@ const processMessage = async (user, update) => {
     }
 
     try {
-        // Check if message is a bot command
-        if (text.startsWith('/')) {
-            await handleBotCommand(text, user, chatId, messageId);
-            console.log(
-                `Successfully processed command ${messageId} for user ${user.id}: "${text}"`
+        // 1. Check for pending conversation state (e.g., due date text input)
+        const pendingConv = getPendingConversation(user.id, chatId);
+        if (pendingConv && pendingConv.type === 'project_due_date') {
+            clearPendingConversation(user.id, chatId);
+
+            if (text.trim().toLowerCase() !== 'skip') {
+                const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+                if (!dateRegex.test(text.trim())) {
+                    await sendTelegramMessage(
+                        user.telegram_bot_token, chatId,
+                        `⚠️ Invalid date format. Please use YYYY-MM-DD (e.g. 2026-06-01) or send 'skip'.`,
+                        messageId
+                    );
+                    // Give the user another chance
+                    setPendingConversation(user.id, chatId, pendingConv);
+                    return;
+                }
+                try {
+                    const project = await Project.findOne({
+                        where: { id: pendingConv.projectId, user_id: user.id },
+                    });
+                    if (project) {
+                        await project.update({ due_date_at: new Date(text.trim()) });
+                    }
+                } catch (e) {
+                    console.error('Error updating project due date:', e);
+                }
+            }
+
+            await sendTelegramMessage(
+                user.telegram_bot_token, chatId,
+                `✅ Project "${pendingConv.projectName}" is all set!`,
+                messageId
             );
             return;
         }
 
-        // Create inbox item for regular messages (with duplicate check)
-        await createInboxItem(text, user.id, messageId);
+        // 2. Handle slash commands
+        if (text.startsWith('/')) {
+            // Extract command and arguments
+            const spaceIdx = text.indexOf(' ');
+            const command = (spaceIdx > -1 ? text.slice(0, spaceIdx) : text).toLowerCase();
+            const args = spaceIdx > -1 ? text.slice(spaceIdx + 1).trim() : '';
 
-        // Send confirmation
+            if (command === '/task') {
+                await handleTaskCommand(args, user, chatId, messageId);
+            } else if (command === '/note') {
+                await handleNoteCommand(args, user, chatId, messageId);
+            } else if (command === '/project') {
+                await handleProjectCommand(args, user, chatId, messageId);
+            } else {
+                await handleBotCommand(text, user, chatId, messageId);
+            }
+            console.log(
+                `Successfully processed command ${messageId} for user ${user.id}: "${command}"`
+            );
+            return;
+        }
+
+        // 3. Regular text → create inbox item (with duplicate check)
+        await createInboxItem(text, user.id, messageId);
         await sendTelegramMessage(
             user.telegram_bot_token,
             chatId,
             `✅ Added to tududi inbox: "${text}"`,
             messageId
         );
-
         console.log(
             `Successfully processed message ${messageId} for user ${user.id}: "${text}"`
         );
@@ -394,7 +716,7 @@ const processMessage = async (user, update) => {
         await sendTelegramMessage(
             user.telegram_bot_token,
             chatId,
-            `❌ Failed to add to inbox: ${error.message}`,
+            `❌ Failed to process message: ${error.message}`,
             messageId
         );
     }
@@ -432,16 +754,19 @@ const processUpdates = async (user, updates) => {
                 // Mark update as processed BEFORE processing to avoid races
                 pollerState.processedUpdates.add(updateKey);
                 await processMessage(user, update);
+            } else if (update.callback_query) {
+                pollerState.processedUpdates.add(updateKey);
+                await processCallbackQuery(user, update.callback_query);
+            }
 
-                // Clean up old processed updates (keep only last 1000 to prevent memory leak)
-                if (pollerState.processedUpdates.size > 1000) {
-                    const oldestEntries = Array.from(
-                        pollerState.processedUpdates
-                    ).slice(0, 100);
-                    oldestEntries.forEach((entry) =>
-                        pollerState.processedUpdates.delete(entry)
-                    );
-                }
+            // Clean up old processed updates (keep only last 1000 to prevent memory leak)
+            if (pollerState.processedUpdates.size > 1000) {
+                const oldestEntries = Array.from(
+                    pollerState.processedUpdates
+                ).slice(0, 100);
+                oldestEntries.forEach((entry) =>
+                    pollerState.processedUpdates.delete(entry)
+                );
             }
         } catch (error) {
             console.error(
@@ -577,4 +902,8 @@ module.exports = {
     _createTelegramUrl: createTelegramUrl,
     _isAuthorizedTelegramUser: isAuthorizedTelegramUser,
     _processMessage: processMessage,
+    _processCallbackQuery: processCallbackQuery,
+    _setPendingConversation: setPendingConversation,
+    _getPendingConversation: getPendingConversation,
+    _clearPendingConversation: clearPendingConversation,
 };

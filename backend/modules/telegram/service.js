@@ -114,7 +114,7 @@ class TelegramService {
         }
 
         // Basic token validation - check if it looks like a Telegram bot token
-        if (!/^\d+:[A-Za-z0-9_-]{35}$/.test(token)) {
+        if (!/^\d+:[A-Za-z0-9_-]{30,}$/.test(token)) {
             throw new ValidationError('Invalid Telegram bot token format.');
         }
 

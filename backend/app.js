@@ -103,6 +103,10 @@ if (API_VERSION && API_BASE_PATH !== '/api') {
     registerUploadsStatic(API_BASE_PATH);
 }
 
+// Telegram Mini App routes (public, no auth — must come before requireAuth)
+const telegramWebAppRouter = require('./modules/telegram/webappRoute');
+app.use(telegramWebAppRouter);
+
 // Authentication middleware
 const { requireAuth } = require('./middleware/auth');
 const { logError } = require('./services/logService');

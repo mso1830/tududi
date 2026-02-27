@@ -437,14 +437,30 @@ const sendCalendar = async (token, chatId, entityType, entityId, year, month) =>
     await sendTelegramMessageWithButtons(token, chatId, 'Select a due date:', keyboard);
 };
 
+// Send a due-date picker: uses Telegram Mini App (web_app button) when BACKEND_URL
+// is HTTPS, otherwise falls back to the inline keyboard calendar.
+const sendDueDatePicker = async (token, chatId, entityType, entityId) => {
+    const backendUrl = process.env.BACKEND_URL || '';
+    if (backendUrl.startsWith('https://')) {
+        const webAppUrl = `${backendUrl}/telegram-datepicker?entity=${entityType}&id=${entityId}`;
+        const buttons = [
+            [{ text: '📅 Pick a due date', web_app: { url: webAppUrl } }],
+            [{ text: 'Skip (no due date)', callback_data: `cal_skip:${entityType}:${entityId}` }],
+        ];
+        await sendTelegramMessageWithButtons(token, chatId, 'Set a due date:', buttons);
+    } else {
+        const now = new Date();
+        await sendCalendar(token, chatId, entityType, entityId, now.getFullYear(), now.getMonth() + 1);
+    }
+};
+
 // --- Project area step (calls sendCalendar for due date) ---
 
 const sendProjectAreaButtons = async (token, chatId, projectId, userId) => {
     const areas = await Area.findAll({ where: { user_id: userId } });
     if (!areas.length) {
-        // No areas — go directly to calendar
-        const now = new Date();
-        await sendCalendar(token, chatId, 'proj', projectId, now.getFullYear(), now.getMonth() + 1);
+        // No areas — go directly to due date picker
+        await sendDueDatePicker(token, chatId, 'proj', projectId);
         return false; // signal: area step skipped
     }
 
@@ -514,8 +530,7 @@ const sendTaskProjectButtons = async (token, chatId, taskId, userId) => {
     const projects = await Project.findAll({ where: { user_id: userId } });
 
     if (!projects.length) {
-        const now = new Date();
-        await sendCalendar(token, chatId, 'task', taskId, now.getFullYear(), now.getMonth() + 1);
+        await sendDueDatePicker(token, chatId, 'task', taskId);
         return false;
     }
 
@@ -769,8 +784,7 @@ const processCallbackQuery = async (user, callbackQuery) => {
                 }
             }
 
-            const now = new Date();
-            await sendCalendar(botToken, chatId, 'task', taskId, now.getFullYear(), now.getMonth() + 1);
+            await sendDueDatePicker(botToken, chatId, 'task', taskId);
             return;
         }
 
@@ -819,8 +833,7 @@ const processCallbackQuery = async (user, callbackQuery) => {
                     await project.update({ area_id: areaId });
                 }
             }
-            const now = new Date();
-            await sendCalendar(botToken, chatId, 'proj', projectId, now.getFullYear(), now.getMonth() + 1);
+            await sendDueDatePicker(botToken, chatId, 'proj', projectId);
         }
     } catch (error) {
         console.error(`Error processing callback query for user ${user.id}:`, error);

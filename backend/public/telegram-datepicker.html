@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+  <title>Set Due Date</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background-color: var(--tg-theme-bg-color, #ffffff);
+      color: var(--tg-theme-text-color, #222222);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 32px 20px;
+    }
+
+    .card {
+      width: 100%;
+      max-width: 380px;
+    }
+
+    h2 {
+      font-size: 22px;
+      font-weight: 700;
+      margin-bottom: 6px;
+      text-align: center;
+      color: var(--tg-theme-text-color, #222222);
+    }
+
+    .hint {
+      font-size: 14px;
+      color: var(--tg-theme-hint-color, #888888);
+      margin-bottom: 24px;
+      text-align: center;
+    }
+
+    input[type="date"] {
+      width: 100%;
+      padding: 15px 16px;
+      font-size: 18px;
+      border-radius: 14px;
+      border: 1.5px solid var(--tg-theme-hint-color, #cccccc);
+      background: var(--tg-theme-secondary-bg-color, #f5f5f5);
+      color: var(--tg-theme-text-color, #222222);
+      outline: none;
+      margin-bottom: 16px;
+      -webkit-appearance: none;
+      appearance: none;
+      cursor: pointer;
+    }
+
+    input[type="date"]:focus {
+      border-color: var(--tg-theme-button-color, #2481cc);
+    }
+
+    .btn-primary {
+      width: 100%;
+      padding: 16px;
+      font-size: 17px;
+      font-weight: 600;
+      background-color: var(--tg-theme-button-color, #2481cc);
+      color: var(--tg-theme-button-text-color, #ffffff);
+      border: none;
+      border-radius: 14px;
+      cursor: pointer;
+      transition: opacity 0.15s;
+      margin-bottom: 10px;
+    }
+
+    .btn-primary:active { opacity: 0.75; }
+    .btn-primary:disabled { opacity: 0.45; cursor: default; }
+
+    .btn-skip {
+      width: 100%;
+      padding: 12px;
+      font-size: 15px;
+      color: var(--tg-theme-hint-color, #888888);
+      background: none;
+      border: none;
+      cursor: pointer;
+      text-decoration: underline;
+      text-underline-offset: 3px;
+    }
+
+    .btn-skip:active { opacity: 0.6; }
+
+    .status {
+      text-align: center;
+      font-size: 14px;
+      color: var(--tg-theme-hint-color, #888888);
+      margin-top: 14px;
+      min-height: 20px;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h2>Set a due date</h2>
+    <p class="hint" id="hint"></p>
+    <input type="date" id="datePicker" />
+    <button class="btn-primary" id="confirmBtn" onclick="confirm()">Confirm</button>
+    <button class="btn-skip" onclick="skip()">Skip — no due date</button>
+    <div class="status" id="status"></div>
+  </div>
+
+  <script>
+    const tg = window.Telegram.WebApp;
+    tg.expand();
+    tg.disableClosingConfirmation();
+
+    const params = new URLSearchParams(window.location.search);
+    const entityType = params.get('entity');
+    const entityId = params.get('id');
+
+    // Pre-fill today's date
+    const today = new Date();
+    const yyyy = today.getFullYear();
+    const mm = String(today.getMonth() + 1).padStart(2, '0');
+    const dd = String(today.getDate()).padStart(2, '0');
+    document.getElementById('datePicker').value = `${yyyy}-${mm}-${dd}`;
+
+    document.getElementById('hint').textContent =
+      entityType === 'task'
+        ? 'Choose a due date for this task'
+        : 'Choose a due date for this project';
+
+    async function sendToBot(date) {
+      const btn = document.getElementById('confirmBtn');
+      const status = document.getElementById('status');
+      btn.disabled = true;
+      status.textContent = 'Saving…';
+
+      try {
+        const res = await fetch('/telegram-datepicker', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            initData: tg.initData,
+            entityType,
+            entityId,
+            date: date || null,
+          }),
+        });
+
+        if (res.ok) {
+          status.textContent = '✓ Saved!';
+          setTimeout(() => tg.close(), 700);
+        } else {
+          const body = await res.json().catch(() => ({}));
+          status.textContent = '❌ ' + (body.error || 'Something went wrong');
+          btn.disabled = false;
+        }
+      } catch {
+        status.textContent = '❌ Network error — please try again';
+        btn.disabled = false;
+      }
+    }
+
+    function confirm() {
+      const date = document.getElementById('datePicker').value;
+      if (!date) {
+        document.getElementById('status').textContent = 'Please pick a date first.';
+        return;
+      }
+      sendToBot(date);
+    }
+
+    function skip() {
+      sendToBot(null);
+    }
+  </script>
+</body>
+</html>

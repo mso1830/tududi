@@ -385,8 +385,8 @@ const Notes: React.FC = () => {
     const filteredNotes = useMemo(() => {
         return notes.filter(
             (note) =>
-                note.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
-                note.content.toLowerCase().includes(searchQuery.toLowerCase())
+                (note.title ?? '').toLowerCase().includes(searchQuery.toLowerCase()) ||
+                (note.content ?? '').toLowerCase().includes(searchQuery.toLowerCase())
         );
     }, [notes, searchQuery]);
 

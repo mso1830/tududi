@@ -69,23 +69,16 @@ const NoteDetails: React.FC = () => {
     };
 
     const handleSaveNote = async (updatedNote: Note) => {
-        try {
-            const noteIdentifier =
-                updatedNote.uid ??
-                (updatedNote.id !== undefined ? String(updatedNote.id) : null);
+        const noteIdentifier =
+            updatedNote.uid ??
+            (updatedNote.id !== undefined ? String(updatedNote.id) : null);
 
-            if (noteIdentifier) {
-                const savedNote = await apiUpdateNote(
-                    noteIdentifier,
-                    updatedNote
-                );
-                setNote(savedNote);
-            } else {
-                console.error('Error: Note identifier is undefined.');
-            }
-        } catch (err) {
-            console.error('Error saving note:', err);
+        if (!noteIdentifier) {
+            throw new Error('Note identifier is undefined.');
         }
+
+        const savedNote = await apiUpdateNote(noteIdentifier, updatedNote);
+        setNote(savedNote);
         setIsNoteModalOpen(false);
     };
 
@@ -269,16 +262,12 @@ const NoteDetails: React.FC = () => {
                         onClose={() => setIsNoteModalOpen(false)}
                         onSave={handleSaveNote}
                         onDelete={async (noteUid) => {
-                            try {
-                                await deleteNoteWithStoreUpdate(
-                                    noteUid,
-                                    showSuccessToast,
-                                    t
-                                );
-                                navigate('/notes');
-                            } catch (err) {
-                                console.error('Error deleting note:', err);
-                            }
+                            await deleteNoteWithStoreUpdate(
+                                noteUid,
+                                () => {}, // NoteModal handles the success toast
+                                t
+                            );
+                            navigate('/notes');
                         }}
                         note={note}
                         projects={projects}

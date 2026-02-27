@@ -368,12 +368,84 @@ const sendProjectStatusButtons = async (token, chatId, projectId) => {
     await sendTelegramMessageWithButtons(token, chatId, 'Set status:', buttons);
 };
 
+// --- Calendar helpers ---
+
+const buildCalendarKeyboard = (entityType, entityId, year, month) => {
+    const buttons = [];
+
+    const monthNames = [
+        'January', 'February', 'March', 'April', 'May', 'June',
+        'July', 'August', 'September', 'October', 'November', 'December',
+    ];
+
+    const prevMonth = month === 1 ? 12 : month - 1;
+    const prevYear = month === 1 ? year - 1 : year;
+    const nextMonth = month === 12 ? 1 : month + 1;
+    const nextYear = month === 12 ? year + 1 : year;
+
+    const prevStr = `${prevYear}-${String(prevMonth).padStart(2, '0')}`;
+    const nextStr = `${nextYear}-${String(nextMonth).padStart(2, '0')}`;
+
+    // Row 1: navigation
+    buttons.push([
+        { text: '< Prev', callback_data: `cal_nav:${entityType}:${entityId}:${prevStr}` },
+        { text: `${monthNames[month - 1]} ${year}`, callback_data: 'cal_ignore' },
+        { text: 'Next >', callback_data: `cal_nav:${entityType}:${entityId}:${nextStr}` },
+    ]);
+
+    // Row 2: weekday headers (Monday-first)
+    buttons.push(['Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa', 'Su'].map((day) => ({
+        text: day,
+        callback_data: 'cal_ignore',
+    })));
+
+    // Calculate starting offset (Monday = 0)
+    const firstDayOfWeek = new Date(year, month - 1, 1).getDay(); // 0=Sun
+    const startOffset = (firstDayOfWeek + 6) % 7; // 0=Mon … 6=Sun
+    const daysInMonth = new Date(year, month, 0).getDate();
+
+    let dayNum = 1;
+    for (let week = 0; week < 6; week++) {
+        if (dayNum > daysInMonth) break;
+        const row = [];
+        for (let col = 0; col < 7; col++) {
+            const cellIndex = week * 7 + col;
+            if (cellIndex < startOffset || dayNum > daysInMonth) {
+                row.push({ text: ' ', callback_data: 'cal_ignore' });
+            } else {
+                const dateStr = `${year}-${String(month).padStart(2, '0')}-${String(dayNum).padStart(2, '0')}`;
+                row.push({
+                    text: String(dayNum),
+                    callback_data: `cal_day:${entityType}:${entityId}:${dateStr}`,
+                });
+                dayNum++;
+            }
+        }
+        buttons.push(row);
+    }
+
+    // Final row: skip
+    buttons.push([
+        { text: 'Skip (no due date)', callback_data: `cal_skip:${entityType}:${entityId}` },
+    ]);
+
+    return buttons;
+};
+
+const sendCalendar = async (token, chatId, entityType, entityId, year, month) => {
+    const keyboard = buildCalendarKeyboard(entityType, entityId, year, month);
+    await sendTelegramMessageWithButtons(token, chatId, 'Select a due date:', keyboard);
+};
+
+// --- Project area step (calls sendCalendar for due date) ---
+
 const sendProjectAreaButtons = async (token, chatId, projectId, userId) => {
     const areas = await Area.findAll({ where: { user_id: userId } });
     if (!areas.length) {
-        // No areas — skip directly to due date
-        await sendProjectDueDatePrompt(token, chatId);
-        return false; // signal: skipped
+        // No areas — go directly to calendar
+        const now = new Date();
+        await sendCalendar(token, chatId, 'proj', projectId, now.getFullYear(), now.getMonth() + 1);
+        return false; // signal: area step skipped
     }
 
     const areaButtons = areas.map((area) => ({
@@ -392,11 +464,77 @@ const sendProjectAreaButtons = async (token, chatId, projectId, userId) => {
     return true; // signal: area step shown
 };
 
-const sendProjectDueDatePrompt = async (token, chatId) => {
-    await sendTelegramMessage(
-        token, chatId,
-        `Set due date (or send 'skip'):\nFormat: YYYY-MM-DD  (e.g. 2026-06-01)`
+// --- Note helpers ---
+
+const sendNoteProjectButtons = async (token, chatId, noteId, projects) => {
+    const projectButtons = projects.map((p) => ({
+        text: p.name,
+        callback_data: `note_proj:${noteId}:${p.id}`,
+    }));
+
+    const rows = [];
+    for (let i = 0; i < projectButtons.length; i += 3) {
+        rows.push(projectButtons.slice(i, i + 3));
+    }
+    rows.push([{ text: 'No Project', callback_data: `note_proj:${noteId}:none` }]);
+
+    await sendTelegramMessageWithButtons(token, chatId, 'Attach to a project?', rows);
+};
+
+// --- Task wizard helpers ---
+
+const sendTaskPriorityButtons = async (token, chatId, taskId, taskName) => {
+    const buttons = [[
+        { text: 'Low', callback_data: `task_priority:${taskId}:0` },
+        { text: 'Medium', callback_data: `task_priority:${taskId}:1` },
+        { text: 'High', callback_data: `task_priority:${taskId}:2` },
+        { text: 'Skip →', callback_data: `task_priority:${taskId}:skip` },
+    ]];
+    await sendTelegramMessageWithButtons(
+        token, chatId, `Set priority for "${taskName}":`, buttons
     );
+};
+
+const sendTaskStatusButtons = async (token, chatId, taskId) => {
+    const buttons = [
+        [
+            { text: 'Not Started', callback_data: `task_status:${taskId}:0` },
+            { text: 'In Progress', callback_data: `task_status:${taskId}:1` },
+        ],
+        [
+            { text: 'Planned', callback_data: `task_status:${taskId}:6` },
+            { text: 'Waiting', callback_data: `task_status:${taskId}:4` },
+            { text: 'Skip →', callback_data: `task_status:${taskId}:skip` },
+        ],
+    ];
+    await sendTelegramMessageWithButtons(token, chatId, 'Set status:', buttons);
+};
+
+const sendTaskProjectButtons = async (token, chatId, taskId, userId) => {
+    const projects = await Project.findAll({ where: { user_id: userId } });
+
+    if (!projects.length) {
+        const now = new Date();
+        await sendCalendar(token, chatId, 'task', taskId, now.getFullYear(), now.getMonth() + 1);
+        return false;
+    }
+
+    const projectButtons = projects.map((p) => ({
+        text: p.name,
+        callback_data: `task_project:${taskId}:${p.id}`,
+    }));
+
+    const rows = [];
+    for (let i = 0; i < projectButtons.length; i += 3) {
+        rows.push(projectButtons.slice(i, i + 3));
+    }
+    rows.push([
+        { text: 'No Project', callback_data: `task_project:${taskId}:none` },
+        { text: 'Skip →', callback_data: `task_project:${taskId}:skip` },
+    ]);
+
+    await sendTelegramMessageWithButtons(token, chatId, 'Attach to a project?', rows);
+    return true;
 };
 
 // --- Slash command handlers ---
@@ -410,12 +548,8 @@ const handleTaskCommand = async (args, user, chatId, messageId) => {
         );
         return;
     }
-    await Task.create({ name: args, user_id: user.id, status: 0 });
-    await sendTelegramMessage(
-        user.telegram_bot_token, chatId,
-        `✅ Task created: "${args}"`,
-        messageId
-    );
+    const task = await Task.create({ name: args, user_id: user.id, status: 0 });
+    await sendTaskPriorityButtons(user.telegram_bot_token, chatId, task.id, task.name);
     console.log(`Task created via Telegram for user ${user.id}: "${args}"`);
 };
 
@@ -428,12 +562,13 @@ const handleNoteCommand = async (args, user, chatId, messageId) => {
         );
         return;
     }
-    await Note.create({ content: args, user_id: user.id });
-    await sendTelegramMessage(
-        user.telegram_bot_token, chatId,
-        '✅ Note saved.',
-        messageId
-    );
+    const note = await Note.create({ content: args, user_id: user.id });
+    const projects = await Project.findAll({ where: { user_id: user.id } });
+    if (!projects.length) {
+        await sendTelegramMessage(user.telegram_bot_token, chatId, '✅ Note saved.', messageId);
+    } else {
+        await sendNoteProjectButtons(user.telegram_bot_token, chatId, note.id, projects);
+    }
     console.log(`Note created via Telegram for user ${user.id}`);
 };
 
@@ -478,32 +613,189 @@ const processCallbackQuery = async (user, callbackQuery) => {
         console.error('Error answering callback query:', e);
     }
 
-    // Parse: `{action}:{projectId}:{value}` — value may contain colons
+    // No-op for calendar header/label buttons
+    if (data === 'cal_ignore') return;
+
+    // Parse action from first colon
     const firstColon = data.indexOf(':');
     if (firstColon === -1) return;
     const action = data.slice(0, firstColon);
     const rest = data.slice(firstColon + 1);
-    const secondColon = rest.indexOf(':');
-    if (secondColon === -1) return;
-    const projectId = parseInt(rest.slice(0, secondColon), 10);
-    const value = rest.slice(secondColon + 1);
-
-    if (isNaN(projectId)) return;
-
-    // Validate project belongs to this app user
-    let project;
-    try {
-        project = await Project.findOne({ where: { id: projectId, user_id: user.id } });
-    } catch (e) {
-        console.error('Error finding project for callback:', e);
-        return;
-    }
-    if (!project) {
-        console.log(`Callback: project ${projectId} not found for user ${user.id}`);
-        return;
-    }
 
     try {
+        // --- Calendar handlers ---
+
+        if (action === 'cal_nav') {
+            // cal_nav:<entityType>:<entityId>:<YYYY-MM>
+            const parts = rest.split(':');
+            if (parts.length < 3) return;
+            const entityType = parts[0];
+            const entityId = parseInt(parts[1], 10);
+            const [year, month] = parts[2].split('-').map(Number);
+            if (isNaN(entityId) || isNaN(year) || isNaN(month)) return;
+            await sendCalendar(botToken, chatId, entityType, entityId, year, month);
+            return;
+        }
+
+        if (action === 'cal_day') {
+            // cal_day:<entityType>:<entityId>:<YYYY-MM-DD>
+            const parts = rest.split(':');
+            if (parts.length < 3) return;
+            const entityType = parts[0];
+            const entityId = parseInt(parts[1], 10);
+            const date = parts[2]; // YYYY-MM-DD
+            if (isNaN(entityId) || !date) return;
+
+            if (entityType === 'task') {
+                const task = await Task.findOne({ where: { id: entityId, user_id: user.id } });
+                if (!task) return;
+                await task.update({ due_date: new Date(date) });
+                clearPendingConversation(user.id, chatId);
+                await sendTelegramMessage(botToken, chatId, `✅ Task "${task.name}" is all set!`);
+            } else if (entityType === 'proj') {
+                const project = await Project.findOne({ where: { id: entityId, user_id: user.id } });
+                if (!project) return;
+                await project.update({ due_date_at: new Date(date) });
+                clearPendingConversation(user.id, chatId);
+                await sendTelegramMessage(botToken, chatId, `✅ Project "${project.name}" is all set!`);
+            }
+            return;
+        }
+
+        if (action === 'cal_skip') {
+            // cal_skip:<entityType>:<entityId>
+            const parts = rest.split(':');
+            if (parts.length < 2) return;
+            const entityType = parts[0];
+            const entityId = parseInt(parts[1], 10);
+            if (isNaN(entityId)) return;
+
+            if (entityType === 'task') {
+                const task = await Task.findOne({ where: { id: entityId, user_id: user.id } });
+                if (!task) return;
+                clearPendingConversation(user.id, chatId);
+                await sendTelegramMessage(botToken, chatId, `✅ Task "${task.name}" is all set!`);
+            } else if (entityType === 'proj') {
+                const project = await Project.findOne({ where: { id: entityId, user_id: user.id } });
+                if (!project) return;
+                clearPendingConversation(user.id, chatId);
+                await sendTelegramMessage(botToken, chatId, `✅ Project "${project.name}" is all set!`);
+            }
+            return;
+        }
+
+        // --- Note handlers ---
+
+        if (action === 'note_proj') {
+            // note_proj:<noteId>:<projectId|none>
+            const secondColon = rest.indexOf(':');
+            if (secondColon === -1) return;
+            const noteId = parseInt(rest.slice(0, secondColon), 10);
+            const projectValue = rest.slice(secondColon + 1);
+            if (isNaN(noteId)) return;
+
+            const note = await Note.findOne({ where: { id: noteId, user_id: user.id } });
+            if (!note) return;
+
+            if (projectValue !== 'none') {
+                const projectId = parseInt(projectValue, 10);
+                if (!isNaN(projectId)) {
+                    const proj = await Project.findOne({ where: { id: projectId, user_id: user.id } });
+                    if (proj) {
+                        await note.update({ project_id: projectId });
+                        await sendTelegramMessage(botToken, chatId, `✅ Note saved and attached to project.`);
+                        return;
+                    }
+                }
+            }
+            await sendTelegramMessage(botToken, chatId, `✅ Note saved (no project).`);
+            return;
+        }
+
+        // --- Task wizard handlers ---
+
+        if (action === 'task_priority') {
+            // task_priority:<taskId>:<0|1|2|skip>
+            const secondColon = rest.indexOf(':');
+            if (secondColon === -1) return;
+            const taskId = parseInt(rest.slice(0, secondColon), 10);
+            const value = rest.slice(secondColon + 1);
+            if (isNaN(taskId)) return;
+
+            const task = await Task.findOne({ where: { id: taskId, user_id: user.id } });
+            if (!task) return;
+            if (value !== 'skip') {
+                await task.update({ priority: parseInt(value, 10) });
+            }
+            await sendTaskStatusButtons(botToken, chatId, taskId);
+            return;
+        }
+
+        if (action === 'task_status') {
+            // task_status:<taskId>:<0|1|4|6|skip>
+            const secondColon = rest.indexOf(':');
+            if (secondColon === -1) return;
+            const taskId = parseInt(rest.slice(0, secondColon), 10);
+            const value = rest.slice(secondColon + 1);
+            if (isNaN(taskId)) return;
+
+            const task = await Task.findOne({ where: { id: taskId, user_id: user.id } });
+            if (!task) return;
+            if (value !== 'skip') {
+                await task.update({ status: parseInt(value, 10) });
+            }
+            await sendTaskProjectButtons(botToken, chatId, taskId, user.id);
+            return;
+        }
+
+        if (action === 'task_project') {
+            // task_project:<taskId>:<projectId|none|skip>
+            const secondColon = rest.indexOf(':');
+            if (secondColon === -1) return;
+            const taskId = parseInt(rest.slice(0, secondColon), 10);
+            const value = rest.slice(secondColon + 1);
+            if (isNaN(taskId)) return;
+
+            const task = await Task.findOne({ where: { id: taskId, user_id: user.id } });
+            if (!task) return;
+
+            if (value !== 'none' && value !== 'skip') {
+                const projectId = parseInt(value, 10);
+                if (!isNaN(projectId)) {
+                    const proj = await Project.findOne({ where: { id: projectId, user_id: user.id } });
+                    if (proj) {
+                        await task.update({ project_id: projectId });
+                    }
+                }
+            }
+
+            const now = new Date();
+            await sendCalendar(botToken, chatId, 'task', taskId, now.getFullYear(), now.getMonth() + 1);
+            return;
+        }
+
+        // --- Project wizard handlers (proj_*) ---
+
+        const secondColon = rest.indexOf(':');
+        if (secondColon === -1) return;
+        const projectId = parseInt(rest.slice(0, secondColon), 10);
+        const value = rest.slice(secondColon + 1);
+        if (isNaN(projectId)) return;
+
+        let project;
+        if (action.startsWith('proj_')) {
+            try {
+                project = await Project.findOne({ where: { id: projectId, user_id: user.id } });
+            } catch (e) {
+                console.error('Error finding project for callback:', e);
+                return;
+            }
+            if (!project) {
+                console.log(`Callback: project ${projectId} not found for user ${user.id}`);
+                return;
+            }
+        }
+
         if (action === 'proj_priority') {
             if (value !== 'skip') {
                 const priorityMap = { low: 0, medium: 1, high: 2 };
@@ -518,15 +810,7 @@ const processCallbackQuery = async (user, callbackQuery) => {
             if (value !== 'skip') {
                 await project.update({ status: value });
             }
-            const areaStepShown = await sendProjectAreaButtons(botToken, chatId, projectId, user.id);
-            // If no areas, sendProjectAreaButtons already sent the due date prompt — set state
-            if (!areaStepShown) {
-                setPendingConversation(user.id, chatId, {
-                    type: 'project_due_date',
-                    projectId,
-                    projectName: project.name,
-                });
-            }
+            await sendProjectAreaButtons(botToken, chatId, projectId, user.id);
 
         } else if (action === 'proj_area') {
             if (value !== 'skip') {
@@ -535,16 +819,12 @@ const processCallbackQuery = async (user, callbackQuery) => {
                     await project.update({ area_id: areaId });
                 }
             }
-            setPendingConversation(user.id, chatId, {
-                type: 'project_due_date',
-                projectId,
-                projectName: project.name,
-            });
-            await sendProjectDueDatePrompt(botToken, chatId);
+            const now = new Date();
+            await sendCalendar(botToken, chatId, 'proj', projectId, now.getFullYear(), now.getMonth() + 1);
         }
     } catch (error) {
         console.error(`Error processing callback query for user ${user.id}:`, error);
-        await sendTelegramMessage(botToken, chatId, `❌ Failed to update project: ${error.message}`);
+        await sendTelegramMessage(botToken, chatId, `❌ Failed to process action: ${error.message}`);
     }
 };
 
@@ -565,7 +845,7 @@ const handleBotCommand = async (command, user, chatId, messageId) => {
             await sendTelegramMessage(
                 botToken,
                 chatId,
-                `📋 tududi Bot Help\n\nCommands:\n/task <name>    - Create a task directly\n/note <text>    - Create a note directly\n/project <name> - Create a project (tap buttons to set details)\n/start          - Welcome message\n/help           - Show this help message\n\nOr just send any text to add it to your inbox.`,
+                `📋 tududi Bot Help\n\nCommands:\n/task <name>    - Create a task, then set priority/status/project/due date\n/note <text>    - Create a note, then optionally attach to a project\n/project <name> - Create a project (tap buttons to set details)\n/start          - Welcome message\n/help           - Show this help message\n\nOr just send any text to add it to your inbox.`,
                 messageId
             );
             break;
@@ -641,44 +921,7 @@ const processMessage = async (user, update) => {
     }
 
     try {
-        // 1. Check for pending conversation state (e.g., due date text input)
-        const pendingConv = getPendingConversation(user.id, chatId);
-        if (pendingConv && pendingConv.type === 'project_due_date') {
-            clearPendingConversation(user.id, chatId);
-
-            if (text.trim().toLowerCase() !== 'skip') {
-                const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
-                if (!dateRegex.test(text.trim())) {
-                    await sendTelegramMessage(
-                        user.telegram_bot_token, chatId,
-                        `⚠️ Invalid date format. Please use YYYY-MM-DD (e.g. 2026-06-01) or send 'skip'.`,
-                        messageId
-                    );
-                    // Give the user another chance
-                    setPendingConversation(user.id, chatId, pendingConv);
-                    return;
-                }
-                try {
-                    const project = await Project.findOne({
-                        where: { id: pendingConv.projectId, user_id: user.id },
-                    });
-                    if (project) {
-                        await project.update({ due_date_at: new Date(text.trim()) });
-                    }
-                } catch (e) {
-                    console.error('Error updating project due date:', e);
-                }
-            }
-
-            await sendTelegramMessage(
-                user.telegram_bot_token, chatId,
-                `✅ Project "${pendingConv.projectName}" is all set!`,
-                messageId
-            );
-            return;
-        }
-
-        // 2. Handle slash commands
+        // 1. Handle slash commands
         if (text.startsWith('/')) {
             // Extract command and arguments
             // Strip @botname suffix Telegram sometimes appends (e.g. /note@MyBot → /note)
@@ -702,7 +945,7 @@ const processMessage = async (user, update) => {
             return;
         }
 
-        // 3. Regular text → create inbox item (with duplicate check)
+        // 2. Regular text → create inbox item (with duplicate check)
         await createInboxItem(text, user.id, messageId);
         await sendTelegramMessage(
             user.telegram_bot_token,
@@ -908,4 +1151,5 @@ module.exports = {
     _setPendingConversation: setPendingConversation,
     _getPendingConversation: getPendingConversation,
     _clearPendingConversation: clearPendingConversation,
+    _buildCalendarKeyboard: buildCalendarKeyboard,
 };

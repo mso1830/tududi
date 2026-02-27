@@ -681,8 +681,10 @@ const processMessage = async (user, update) => {
         // 2. Handle slash commands
         if (text.startsWith('/')) {
             // Extract command and arguments
+            // Strip @botname suffix Telegram sometimes appends (e.g. /note@MyBot → /note)
             const spaceIdx = text.indexOf(' ');
-            const command = (spaceIdx > -1 ? text.slice(0, spaceIdx) : text).toLowerCase();
+            const rawCommand = (spaceIdx > -1 ? text.slice(0, spaceIdx) : text).toLowerCase();
+            const command = rawCommand.split('@')[0];
             const args = spaceIdx > -1 ? text.slice(spaceIdx + 1).trim() : '';
 
             if (command === '/task') {

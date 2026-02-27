@@ -147,6 +147,7 @@
     "express-rate-limit": "^8.2.1",
     "express-session": "~1.18.1",
     "helmet": "~8.1.0",
+    "i18next": "^25.8.13",
     "js-yaml": "~4.1.0",
     "linguaisync": "^0.1.2",
     "lodash": "~4.17.21",

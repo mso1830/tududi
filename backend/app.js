@@ -115,6 +115,7 @@ app.use((req, res, next) => {
     // Mark exempt requests so lusca wrapper can skip them
     if (
         process.env.NODE_ENV === 'test' ||
+        req.session?.userId ||
         req.headers.authorization?.startsWith('Bearer ') ||
         isPublicPath ||
         isOidcPath ||

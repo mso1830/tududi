@@ -146,10 +146,10 @@ const TaskDetails: React.FC = () => {
         recurrence_type: task?.recurrence_type || 'none',
         recurrence_interval: task?.recurrence_interval || 1,
         recurrence_end_date: task?.recurrence_end_date || '',
-        recurrence_weekday: task?.recurrence_weekday || null,
+        recurrence_weekday: task?.recurrence_weekday ?? null,
         recurrence_weekdays: task?.recurrence_weekdays || [],
-        recurrence_month_day: task?.recurrence_month_day || null,
-        recurrence_week_of_month: task?.recurrence_week_of_month || null,
+        recurrence_month_day: task?.recurrence_month_day ?? null,
+        recurrence_week_of_month: task?.recurrence_week_of_month ?? null,
         completion_based: task?.completion_based || false,
     });
     const [activePill, setActivePill] = useState('overview');
@@ -165,10 +165,10 @@ const TaskDetails: React.FC = () => {
             recurrence_type: task?.recurrence_type || 'none',
             recurrence_interval: task?.recurrence_interval || 1,
             recurrence_end_date: task?.recurrence_end_date || '',
-            recurrence_weekday: task?.recurrence_weekday || null,
+            recurrence_weekday: task?.recurrence_weekday ?? null,
             recurrence_weekdays: task?.recurrence_weekdays || [],
-            recurrence_month_day: task?.recurrence_month_day || null,
-            recurrence_week_of_month: task?.recurrence_week_of_month || null,
+            recurrence_month_day: task?.recurrence_month_day ?? null,
+            recurrence_week_of_month: task?.recurrence_week_of_month ?? null,
             completion_based: task?.completion_based || false,
         });
     }, [
@@ -193,10 +193,10 @@ const TaskDetails: React.FC = () => {
             recurrence_type: task?.recurrence_type || 'none',
             recurrence_interval: task?.recurrence_interval || 1,
             recurrence_end_date: task?.recurrence_end_date || '',
-            recurrence_weekday: task?.recurrence_weekday || null,
+            recurrence_weekday: task?.recurrence_weekday ?? null,
             recurrence_weekdays: task?.recurrence_weekdays || [],
-            recurrence_month_day: task?.recurrence_month_day || null,
-            recurrence_week_of_month: task?.recurrence_week_of_month || null,
+            recurrence_month_day: task?.recurrence_month_day ?? null,
+            recurrence_week_of_month: task?.recurrence_week_of_month ?? null,
             completion_based: task?.completion_based || false,
         });
         setIsEditingRecurrence(true);
@@ -253,7 +253,7 @@ const TaskDetails: React.FC = () => {
                 recurrence_weekday:
                     recurrenceForm.recurrence_type === 'weekly' ||
                     recurrenceForm.recurrence_type === 'monthly_weekday'
-                        ? recurrenceForm.recurrence_weekday || null
+                        ? recurrenceForm.recurrence_weekday ?? null
                         : null,
                 recurrence_weekdays:
                     recurrenceForm.recurrence_type === 'weekly'
@@ -261,11 +261,11 @@ const TaskDetails: React.FC = () => {
                         : null,
                 recurrence_month_day:
                     recurrenceForm.recurrence_type === 'monthly'
-                        ? recurrenceForm.recurrence_month_day || null
+                        ? recurrenceForm.recurrence_month_day ?? null
                         : null,
                 recurrence_week_of_month:
                     recurrenceForm.recurrence_type === 'monthly_weekday'
-                        ? recurrenceForm.recurrence_week_of_month || null
+                        ? recurrenceForm.recurrence_week_of_month ?? null
                         : null,
                 completion_based: recurrenceForm.completion_based,
             };
@@ -304,10 +304,10 @@ const TaskDetails: React.FC = () => {
             recurrence_type: task?.recurrence_type || 'none',
             recurrence_interval: task?.recurrence_interval || 1,
             recurrence_end_date: task?.recurrence_end_date || '',
-            recurrence_weekday: task?.recurrence_weekday || null,
+            recurrence_weekday: task?.recurrence_weekday ?? null,
             recurrence_weekdays: task?.recurrence_weekdays || [],
-            recurrence_month_day: task?.recurrence_month_day || null,
-            recurrence_week_of_month: task?.recurrence_week_of_month || null,
+            recurrence_month_day: task?.recurrence_month_day ?? null,
+            recurrence_week_of_month: task?.recurrence_week_of_month ?? null,
             completion_based: task?.completion_based || false,
         });
     };

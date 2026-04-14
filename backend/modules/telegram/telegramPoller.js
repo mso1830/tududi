@@ -1,5 +1,9 @@
 const https = require('https');
-const { User, InboxItem } = require('../../models');
+const { Op } = require('sequelize');
+const { User, InboxItem, Task } = require('../../models');
+const {
+    analyzeTelegramInboxItem,
+} = require('./telegramInboxAssistantService');
 
 // Create poller state
 const createPollerState = () => ({
@@ -14,6 +18,7 @@ const createPollerState = () => ({
 
 // Global mutable state (managed functionally)
 let pollerState = createPollerState();
+const pendingTelegramActions = new Map();
 
 // Check if user exists in list
 const userExistsInList = (users, userId) => users.some((u) => u.id === userId);
@@ -248,10 +253,10 @@ const updateUserChatId = async (userId, chatId) => {
 };
 
 const buildTelegramWelcomeMessage = () =>
-    `🎉 Welcome to tududi!\n\nYour personal task management bot is now connected and ready to help!\n\n📝 Send any plain message to capture it in your tududi inbox.\n\n✨ Helpful commands:\n• /help - See everything the bot can do\n• /today - Get your current task summary\n• /inbox - Show your latest inbox captures\n• /status - Check connection and summary status\n• /plan <task> - Break a task into actionable subtasks\n\nLet's get organized! 🚀`;
+    `🎉 Welcome to tududi!\n\nYour personal task management bot is now connected and ready to help!\n\n📝 Send any plain message to capture it in your tududi inbox. If the request is clear, I'll break it into smaller tasks with difficulty and time estimates, then ask for approval before creating it. If it is vague, I'll ask a quick clarification question first.\n\n✨ Helpful commands:\n• /help - See everything the bot can do\n• /today - Get your current task summary\n• /inbox - Show your latest inbox captures\n• /status - Check connection and summary status\n• /plan <task> - Break a task into actionable subtasks\n\nLet's get organized! 🚀`;
 
 const buildTelegramHelpMessage = () =>
-    `📋 tududi Bot Help\n\nWhat you can do:\n• Send any plain message → save it to your tududi inbox\n• /today → get your current task summary\n• /inbox → show your latest inbox captures\n• /status → check bot and summary settings\n• /plan <task> → break a task into actionable subtasks\n\nExamples:\n• Buy birthday gift ideas\n• /plan launch referral program\n• /today\n\nTip: include project names, due dates, or constraints in your message so tududi can preserve better context.`;
+    `📋 tududi Bot Help\n\nWhat you can do:\n• Send any plain message → save it to your tududi inbox, then get a clarification question or approval-ready task breakdown\n• /today → get your current task summary\n• /inbox → show your latest inbox captures\n• /status → check bot and summary settings\n• /plan <task> → break a task into actionable subtasks\n\nExamples:\n• Buy birthday gift ideas\n• Plan spring fundraiser for PTA by May 10\n• /plan launch referral program\n• /today\n\nTip: include project names, due dates, or constraints in your message so tududi can preserve better context.`;
 
 const buildTelegramStatusMessage = (user) => {
     const summaryState = user.task_summary_enabled ? 'enabled' : 'disabled';
@@ -290,7 +295,7 @@ const createInboxItem = async (content, userId, messageId) => {
             user_id: userId,
             source: 'telegram',
             created_at: {
-                [require('sequelize').Op.gte]: recentCutoff,
+                [Op.gte]: recentCutoff,
             },
         },
     });
@@ -309,6 +314,162 @@ const createInboxItem = async (content, userId, messageId) => {
         metadata: { telegram_message_id: messageId }, // Store message ID for reference
     });
 };
+
+const getPendingActionKey = (userId, chatId) => `${userId}:${chatId}`;
+
+const setPendingAction = (userId, chatId, action) => {
+    pendingTelegramActions.set(getPendingActionKey(userId, chatId), {
+        ...action,
+        updatedAt: Date.now(),
+    });
+};
+
+const getPendingAction = (userId, chatId) =>
+    pendingTelegramActions.get(getPendingActionKey(userId, chatId));
+
+const clearPendingAction = (userId, chatId) => {
+    pendingTelegramActions.delete(getPendingActionKey(userId, chatId));
+};
+
+const isApprovalText = (text) =>
+    /^(approve|yes|y|ok|okay|looks good|go ahead)\b/i.test(text.trim());
+
+const isRejectionText = (text) =>
+    /^(no|n|cancel|skip|leave it|not now)\b/i.test(text.trim());
+
+const formatApprovalPlanMessage = (plan) => {
+    const subtaskLines = (plan.subtasks || [])
+        .map((subtask, index) => {
+            const details = [
+                `difficulty: ${subtask.difficulty}`,
+                `time: ${subtask.time_estimate}`,
+            ];
+
+            if (subtask.context) {
+                details.push(subtask.context);
+            }
+
+            return `${index + 1}. ${subtask.name} (${details.join(' • ')})`;
+        })
+        .join('\n');
+
+    return [
+        `🧠 ${plan.summary}`,
+        '',
+        plan.approval_message,
+        '',
+        'Suggested subtasks:',
+        subtaskLines,
+        '',
+        'Reply APPROVE to create this task with subtasks in tududi, or reply with changes/cancel.',
+    ].join('\n');
+};
+
+const formatClarificationMessage = (analysis) =>
+    [
+        '🤔 I need one quick clarification before I break this down:',
+        '',
+        analysis.clarification_question,
+        '',
+        'Reply with the answer and I will refine the plan.',
+    ].join('\n');
+
+const createTaskFromApprovedPlan = async (userId, pendingAction) => {
+    const parentTask = await Task.create({
+        name: pendingAction.taskName,
+        note: `Created from Telegram inbox item.\n\nOriginal request:\n${pendingAction.originalText}`,
+        user_id: userId,
+        status: Task.STATUS.NOT_STARTED,
+    });
+
+    for (const subtask of pendingAction.plan.subtasks || []) {
+        await Task.create({
+            name: subtask.name,
+            note: [
+                `Difficulty: ${subtask.difficulty}`,
+                `Estimated time: ${subtask.time_estimate}`,
+                subtask.context ? `Context: ${subtask.context}` : null,
+            ]
+                .filter(Boolean)
+                .join('\n'),
+            user_id: userId,
+            parent_task_id: parentTask.id,
+            status: Task.STATUS.NOT_STARTED,
+        });
+    }
+
+    if (pendingAction.inboxItem?.update) {
+        await pendingAction.inboxItem.update({ status: 'processed' });
+    }
+
+    return parentTask;
+};
+
+const handlePendingTelegramAction = async (
+    user,
+    chatId,
+    messageId,
+    text,
+    pendingAction
+) => {
+    if (pendingAction.stage === 'approval') {
+        if (isApprovalText(text)) {
+            const parentTask = await createTaskFromApprovedPlan(user.id, pendingAction);
+            clearPendingAction(user.id, chatId);
+            await sendTelegramMessage(
+                user.telegram_bot_token,
+                chatId,
+                `✅ Created task "${pendingAction.taskName}" with ${(pendingAction.plan.subtasks || []).length} subtasks in tududi.\nTask UID: ${parentTask.uid}`,
+                messageId
+            );
+            return true;
+        }
+
+        if (isRejectionText(text)) {
+            clearPendingAction(user.id, chatId);
+            await sendTelegramMessage(
+                user.telegram_bot_token,
+                chatId,
+                '👌 Okay — I left the item in your inbox and cancelled the pending plan.',
+                messageId
+            );
+            return true;
+        }
+    }
+
+    const mergedText = `${pendingAction.originalText}\n\nAdditional context from user: ${text.trim()}`;
+    const refreshedAnalysis = await analyzeTelegramInboxItem(mergedText);
+
+    if (refreshedAnalysis.status === 'clarification_needed') {
+        setPendingAction(user.id, chatId, {
+            ...pendingAction,
+            originalText: mergedText,
+            stage: 'clarification',
+        });
+        await sendTelegramMessage(
+            user.telegram_bot_token,
+            chatId,
+            formatClarificationMessage(refreshedAnalysis),
+            messageId
+        );
+        return true;
+    }
+
+    setPendingAction(user.id, chatId, {
+        ...pendingAction,
+        originalText: mergedText,
+        plan: refreshedAnalysis,
+        stage: 'approval',
+    });
+    await sendTelegramMessage(
+        user.telegram_bot_token,
+        chatId,
+        formatApprovalPlanMessage(refreshedAnalysis),
+        messageId
+    );
+    return true;
+};
+
 
 // Function to check if a Telegram user is authorized
 const isAuthorizedTelegramUser = (user, message) => {
@@ -532,16 +693,55 @@ const processMessage = async (user, update) => {
             return;
         }
 
-        // Create inbox item for regular messages (with duplicate check)
-        await createInboxItem(text, user.id, messageId);
+        const pendingAction = getPendingAction(user.id, chatId);
+        if (pendingAction) {
+            await handlePendingTelegramAction(
+                user,
+                chatId,
+                messageId,
+                text,
+                pendingAction
+            );
+            console.log(
+                `Successfully processed pending Telegram action ${messageId} for user ${user.id}: "${text}"`
+            );
+            return;
+        }
 
-        // Send confirmation
-        await sendTelegramMessage(
-            user.telegram_bot_token,
-            chatId,
-            `✅ Added to tududi inbox: "${text}"`,
-            messageId
-        );
+        // Create inbox item for regular messages (with duplicate check)
+        const inboxItem = await createInboxItem(text, user.id, messageId);
+        const analysis = await analyzeTelegramInboxItem(text);
+        const taskName =
+            text.length > 120 ? `${text.slice(0, 117).trim()}...` : text.trim();
+
+        if (analysis.status === 'clarification_needed') {
+            setPendingAction(user.id, chatId, {
+                stage: 'clarification',
+                inboxItem,
+                originalText: text,
+                taskName,
+            });
+            await sendTelegramMessage(
+                user.telegram_bot_token,
+                chatId,
+                formatClarificationMessage(analysis),
+                messageId
+            );
+        } else {
+            setPendingAction(user.id, chatId, {
+                stage: 'approval',
+                inboxItem,
+                originalText: text,
+                taskName,
+                plan: analysis,
+            });
+            await sendTelegramMessage(
+                user.telegram_bot_token,
+                chatId,
+                formatApprovalPlanMessage(analysis),
+                messageId
+            );
+        }
 
         console.log(
             `Successfully processed message ${messageId} for user ${user.id}: "${text}"`
@@ -790,4 +990,6 @@ module.exports = {
     _createTelegramUrl: createTelegramUrl,
     _isAuthorizedTelegramUser: isAuthorizedTelegramUser,
     _processMessage: processMessage,
+    _getPendingActionForTests: getPendingAction,
+    _clearPendingActionsForTests: () => pendingTelegramActions.clear(),
 };

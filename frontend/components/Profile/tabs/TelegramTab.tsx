@@ -59,6 +59,11 @@ const TelegramTab: React.FC<TelegramTabProps> = ({
             command: '/plan <task>',
             description: 'Generate an AI delegation plan for a task idea',
         },
+        {
+            command: 'plain message',
+            description:
+                'Capture an inbox item, get clarifying questions if needed, then approve an AI task breakdown with difficulty and time estimates',
+        },
     ];
 
     if (!isActive) return null;
